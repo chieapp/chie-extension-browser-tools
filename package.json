@@ -1,0 +1,21 @@
+{
+  "name": "chie-extension-agent-service",
+  "private": true,
+  "displayName": "Agent Service",
+  "version": "0.0.1",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc"
+  },
+  "devDependencies": {
+    "@types/node": "18.x",
+    "chie": "../chie/types/",
+    "typescript": "5.0.2"
+  },
+  "dependencies": {
+    "@mozilla/readability": "^0.4.4",
+    "googlethis": "^1.7.1",
+    "jsdom": "^22.0.0",
+    "vm2": "^3.9.17"
+  }
+}
