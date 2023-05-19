@@ -80,7 +80,7 @@ cheerio@1.0.0-rc.10:
     parse5-htmlparser2-tree-adapter "^6.0.1"
     tslib "^2.2.0"
 
-chie@../chie/types/:
+chie@../chie/types:
   version "0.2.0"
   dependencies:
     gui "0.13.8"

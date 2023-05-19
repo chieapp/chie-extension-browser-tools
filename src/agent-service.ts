@@ -1,33 +1,64 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import {APIError, ChatMessage, ChatRole, ChatService} from 'chie';
+import {
+  APIError,
+  BaseChatService,
+  BaseChatServiceData,
+  BaseChatServiceOptions,
+  ChatCompletionAPI,
+  ChatHistoryData,
+  ChatMessage,
+  ChatRole,
+  ChatStep,
+} from 'chie';
 
-import Tool from './tool';
+import Tool, {ExecutionResult} from './tool';
 
-interface DeduceStep {
-  name: 'Thought' | 'Action' | 'Observation' | 'Answer';
-  value: string;
+interface Action {
+  tool: string;
+  input: string;
 }
 
-export default class AgentService extends ChatService {
+class DeduceStep implements ChatStep {
+  name: 'Thought' | 'Action' | 'Observation' | 'Answer';
+  value: string | Action | ExecutionResult;
+
+  constructor(name, value) {
+    this.name = name;
+    this.value = value;
+  }
+
+  toString() {
+    if (this.name == 'Action') {
+      const action = this.value as Action;
+      return `Action: ${action.tool}("${action.input}")`;
+    } else if (this.name == 'Observation') {
+      const observation = this.value as ExecutionResult;
+      return `Observation: ${observation.resultForHuman}`;
+    } else {
+      return `${this.name}: ${this.value}`;
+    }
+  }
+}
+
+export default class AgentService extends BaseChatService<ChatCompletionAPI> {
   tools: Tool[] = [];
+  promptText: string;
 
   state: 'start' | 'think' | 'action' | 'before-execute' | 'execute' | 'begin-answer' | 'answer' | 'end';
-  steps: DeduceStep[];
+  buffer: string;
+  abortedByUs: boolean;
+  agentAborter: AbortController;
 
-  // Our fake pending message.
-  #agentMessage: Partial<ChatMessage>;
-
-  // Saved execution.
-  #execution?: () => void;
+  // Saved execution of action.
+  execution?: () => Promise<ChatMessage>;
 
   static deserialize(data) {
-    return ChatService.deserialize(data);
+    return BaseChatService.deserialize(data);
   }
 
   constructor(options) {
     super(options);
-
     // Read tools.
     for (const name of fs.readdirSync(__dirname)) {
       if (name.startsWith('tool-')) {
@@ -35,46 +66,68 @@ export default class AgentService extends ChatService {
         this.tools.push(new tool());
       }
     }
-
     // Construct prompt text.
-    const promptText = fs.readFileSync(path.join(__dirname, '..', 'prompt.txt'))
+    this.promptText = fs.readFileSync(path.join(__dirname, '..', 'prompt.txt'))
       .toString()
       .replace('{{toolNames}}', this.tools.map(t => t.name).join(', '))
       .replace('{{tools}}', this.tools.map(t => `  ${t.name}: ${t.descriptionForModel}`).join('\n\n'));
-    this.setParam('systemPrompt', promptText);
   }
 
-  getHistory() {
-    // Last history entry is our request.
-    if (this.state == 'execute' && this.#lastMessageIsFromAssitant())
-      return this.history.slice(0, -1);
-    return this.history;
+  deserializeHistory(data: ChatHistoryData) {
+    super.deserializeHistory(data);
+    for (const message of this.history) {
+      if (message.steps)
+        message.steps = message.steps.map((raw: DeduceStep) => new DeduceStep(raw.name, raw.value));
+    }
   }
 
-  getPendingMessage() {
-    return this.#agentMessage;
+  canRegenerateFrom() {
+    return true;
   }
 
-  isPending() {
-    return this.#agentMessage != null;
+  async sendHistoryAndGetResponse(options) {
+    // Initialize state.
+    this.state = 'start' as typeof this.state;
+    let thinkProgress: ChatMessage | null;
+    // Enter think <=> action loop.
+    do {
+      // Clear buffer for new response.
+      this.buffer = '';
+      this.abortedByUs = false;
+      this.agentAborter = new AbortController();
+      this.execution = null;
+      // Add system prompt and history.
+      const conversation = [{role: ChatRole.System, content: this.promptText}, ...this.history.map(formatMessage)];
+      // Add result of thinking and action.
+      if (thinkProgress) {
+        conversation.push(thinkProgress);
+        thinkProgress = null;
+      }
+      // Call API.
+      try {
+        await this.api.sendConversation(conversation, {
+          signal: this.agentAborter.signal,
+          onMessageDelta: this.#parseDelta.bind(this),
+        });
+      } catch (error) {
+        // Ignored intentional aborts by us.
+        if (!(error.name == 'AbortError' && this.abortedByUs))
+          throw error;
+      }
+      // Execute the action if there is one.
+      if (this.execution) {
+        if (this.state != 'execute')
+          throw new APIError(`Unexpected state when executing action: ${this.state}.`);
+        thinkProgress = await this.execution();
+      } else if (this.state != 'end') {
+        throw new APIError(`Unexpected state after end of message: ${this.state}.`);
+      }
+    } while (this.state != 'end');
   }
 
-  isAborted() {
-    return false;
-  }
-
-  notifyMessageBegin() {
-    if (this.state == 'execute')
-      return;
-    this.state = 'start';
-    this.steps = [];
-    this.#agentMessage = {steps: [], content: ''};
-    super.notifyMessageBegin();
-  }
-
-  notifyMessageDelta(delta, response) {
-    if (!this.pendingMessage?.content)
-      return;
+  #parseDelta(delta, response) {
+    if (delta.content)
+      this.buffer += delta.content;
     if (this.state == 'start') {
       // Start of bot message.
       if (!response.pending)
@@ -98,41 +151,26 @@ export default class AgentService extends ChatService {
         return;
       // Print thought.
       const thought = this.#findStringBetween(/\n*Thought:/, /\n\w+:/);
-      const step = `Thought: ${thought}`;
-      super.notifyMessageDelta({steps: [ step ]}, response);
-      this.#agentMessage.steps.push(step);
-      this.steps.push({name: 'Thought', value: thought});
+      this.notifyMessageDelta({steps: [ new DeduceStep('Thought', thought) ]}, response);
       this.state = nextIsAction ? 'action' : 'begin-answer';
     } else if (this.state == 'action') {
       // After action is observation.
       if (!this.#findStringBetween(/\n*Observation:/))
         return;
       // Print action.
-      const action = this.#findStringBetween(/\n*Action:/, /\n\w+:/).toLowerCase();
+      const tool = this.#findStringBetween(/\n*Action:/, /\n\w+:/).toLowerCase();
       let input = this.#findStringBetween(/\n*Input:/, /\n\w+:/);
       if (!input) {
-        this.notifyMessageError(new APIError(`Missing input for action: ${action}.`));
-        return;
+        this.#abortAgent();
+        throw new APIError(`Missing input for action: ${tool}.`);
       }
       input = removeQuotes(input);
-      const step = `Action: ${action}("${input}")`;
-      super.notifyMessageDelta({steps: [ step ]}, response);
-      this.#agentMessage.steps.push(step);
-      this.steps.push({name: 'Action', value: `${action}\nInput:${input}`});
-      // Abort since we don't need chatgpt's imaginary observation.
-      this.state = 'before-execute';
-      this.aborter.abort();
-      this.#execution = this.#execute.bind(this, action, input);
-    } else if (this.state == 'before-execute') {
-      // After previous abortion there will be an end delta.
-      if (response.pending) {
-        this.notifyMessageError(new APIError('Unexpected pending delta.'));
-        return;
-      }
+      this.notifyMessageDelta({steps: [ new DeduceStep('Action', {tool, input}) ]}, response);
+      // Prepare for action execution.
       this.state = 'execute';
-      // Only start new message after previous one is ended.
-      this.#execution();
-      this.#execution = null;
+      this.execution = this.#execute.bind(this, tool, input);
+      // Abort since we don't need chatgpt's imaginary observation.
+      this.#abortAgent();
     } else if (this.state == 'execute') {
       // Start receving thought of observation.
       if (!response.pending)
@@ -144,101 +182,90 @@ export default class AgentService extends ChatService {
     } else if (this.state == 'begin-answer') {
       // Print answer.
       const content = this.#findStringBetween(/\n*Answer:/) + delta.content;
-      super.notifyMessageDelta({content}, response);
-      this.#agentMessage.content += content;
+      this.notifyMessageDelta({content}, response);
       if (response.pending)  // more answer streaming
         this.state = 'answer';
       else
         this.#end();
     } else if (this.state == 'answer') {
       // Stream answer.
-      super.notifyMessageDelta(delta, response);
-      this.#agentMessage.content += delta.content;
+      this.notifyMessageDelta(delta, response);
       if (!response.pending)
         this.#end();
+    } else if (this.state == 'end') {
+      // Just print out data when not in state machine.
+      this.notifyMessageDelta(delta, response);
     } else {
-      this.notifyMessageError(new APIError(`Invalid state: ${this.state}.`));
+      throw new APIError(`Invalid state: ${this.state}.`);
     }
-  }
-
-  notifyMessageError(error) {
-    super.notifyMessageError(error);
-    this.#end();
-  }
-
-  notifyMessage(message) {
-    if (this.state == 'execute')
-      return;
-    super.notifyMessage(message);
   }
 
   async #execute(action: string, input: string) {
     // Find tool.
     const tool = this.tools.find(t => t.name == action);
-    if (!tool) {
-      this.notifyMessageError(new APIError(`Can not find action: ${action}.`));
-      return;
-    }
+    if (!tool)
+      throw new APIError(`Can not find action: ${action}.`);
     // Use tool.
     try {
       const result = await tool.execute(input);
-      const step = `Observation: ${result.resultForHuman}`;
-      super.notifyMessageDelta({steps: [ step ]}, {pending: true});
-      this.#agentMessage.steps.push(step);
-      this.steps.push({name: 'Observation', value: result.resultForModel});
+      this.notifyMessageDelta({steps: [ new DeduceStep('Observation', result) ]}, {pending: true});
     } catch (error) {
-      this.notifyMessageError(new APIError(`Failed to execute action: ${action}(${input}): ${error.message}.`));
-      return;
+      throw new APIError(`Failed to execute action: ${action}(${input}): ${error.message}.`);
     }
     // Construct a fake response from bot.
-    const content = this.steps.map(s => `${s.name}: ${s.value}`).join('\n');
-    // Send response.
-    if (this.#lastMessageIsFromAssitant())
-      this.history.pop();
-    this.history.push({role: ChatRole.Assistant, content});
-    try {
-      await super.invokeChatAPI({});
-    } finally {
-      // Concatenate the new response to previous one.
-      if (this.history.length > 2 && this.history[this.history.length - 2].role == ChatRole.Assistant) {
-        this.history[this.history.length - 2].content += this.history[this.history.length -1].content;
-        this.history.pop();
-      }
-      super.saveHistory();
-    }
+    return formatMessage(this.pendingMessage);
+  }
+
+  #abortAgent() {
+    this.abortedByUs = true;
+    this.agentAborter.abort();
   }
 
   #unexpectedResponse() {
     this.#end();
     // Just print out what we got so far.
-    super.notifyMessageDelta(this.pendingMessage, {pending: false});
+    this.notifyMessageDelta({content: this.buffer}, {pending: false});
   }
 
   #end() {
     this.state = 'end';
-    this.aborter.abort();
-    if (this.lastError?.name == 'AbortError')
-      this.lastError = null;
-    this.#agentMessage = null;
-  }
-
-  #lastMessageIsFromAssitant() {
-    return this.history[this.history.length - 1].role == ChatRole.Assistant;
+    this.#abortAgent();
   }
 
   #findStringBetween(startText: RegExp, endText?: RegExp) {
-    const content = this.pendingMessage.content;
-    const match = startText.exec(content);
+    const match = startText.exec(this.buffer);
     if (!match)
       return null;
     const start = match.index + match[0].length;
     if (endText) {
-      const end = endText.exec(content.slice(start));
+      const end = endText.exec(this.buffer.slice(start));
       if (end)
-        return content.slice(start, start + end.index).trim();
+        return this.buffer.slice(start, start + end.index).trim();
     }
-    return content.slice(start).trim();
+    return this.buffer.slice(start).trim();
   }
+}
+
+function formatMessage(message: Partial<ChatMessage>) {
+  let content = '';
+  if (message.steps) {
+    for (const step of message.steps) {
+      if (!(step instanceof DeduceStep))
+        continue;
+      if (step.name == 'Action') {
+        const action = step.value as Action;
+        content += `Action: ${action.tool}\nInput: ${action.input}\n`;
+      } else if (step.name == 'Observation') {
+        const observation = step.value as ExecutionResult;
+        content += `Observation: ${observation.resultForModel}\n`;
+      } else {
+        content += `${step.name}: ${step.value}\n`;
+      }
+    }
+  }
+  if (message.content)
+    content += `Answer: ${message.content}\n`;
+  return {role: message.role, content};
 }
 
 function removeQuotes(str: string) {
