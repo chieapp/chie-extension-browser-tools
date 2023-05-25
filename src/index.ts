@@ -11,16 +11,16 @@ import MultiAgentsService from './multi-agents-service';
 export function activate() {
   serviceManager.registerService({
     name: 'AgentService',
-    serviceType: AgentService,
-    viewType: ChatView,
-    apiTypes: [ChatCompletionAPI],
+    serviceClass: AgentService,
+    apiClasses: [ChatCompletionAPI],
+    viewClasses: [ChatView],
     description: 'Have AI agents work for you.',
   });
   serviceManager.registerService({
     name: 'MultiAgentsService',
-    serviceType: MultiAgentsService,
-    viewType: MultiChatsView,
-    apiTypes: [ChatCompletionAPI],
+    serviceClass: MultiAgentsService,
+    apiClasses: [ChatCompletionAPI],
+    viewClasses: [MultiChatsView],
     description: 'Have multiple AI agents work for you.',
   });
 }

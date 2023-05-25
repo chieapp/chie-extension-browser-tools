@@ -53,10 +53,6 @@ export default class AgentService extends BaseChatService<ChatCompletionAPI> {
   // Saved execution of action.
   execution?: () => Promise<ChatMessage>;
 
-  static deserialize(data) {
-    return BaseChatService.deserialize(data);
-  }
-
   constructor(options) {
     super(options);
     // Read tools.
