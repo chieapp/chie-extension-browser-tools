@@ -1,17 +1,21 @@
-import {BrowserWindow} from 'chie';
+import {BrowserWindow, Tool} from 'chie';
 import {JSDOM} from 'jsdom';
 import {Readability} from '@mozilla/readability';
 
-import Tool from './tool';
+export default {
+  name: 'browse',
+  displayName: 'Browse',
+  descriptionForModel: 'Read content of URL from Internet.',
 
-export default class ToolBrowse implements Tool {
-  name = 'browse';
-  displayName = 'Browse';
-  descriptionForModel = `\
-Read content of URL from internet. Input is web page URL. Output is the text \
-content of of the URL's page.`;
+  parameters: [
+    {
+      name: 'url',
+      description: 'The URL of web page',
+      type: 'string' as const,
+    },
+  ],
 
-  async execute(url: string) {
+  async execute(signal, {url}) {
     const win = new BrowserWindow();
     win.browser.loadURL(url);
     try {
@@ -25,8 +29,8 @@ content of of the URL's page.`;
       const reader = new Readability(dom.window.document);
       const article = reader.parse();
       return {
-        resultForModel: article ? article.textContent.trim().substring(0, 3000) : 'Empty',
-        resultForHuman: article ? article.title : 'Empty',
+        resultForModel: article?.textContent.trim().substring(0, 3000) ?? '(no content)',
+        resultForHuman: article?.title ?? '(no title)',
       };
     } finally {
       win.close();

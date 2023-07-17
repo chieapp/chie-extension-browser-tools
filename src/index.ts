@@ -1,26 +1,14 @@
-import {
-  ChatCompletionAPI,
-  ChatView,
-  MultiChatsView,
-  serviceManager,
-} from 'chie';
+import {toolManager} from 'chie';
 
-import AgentService from './agent-service';
-import MultiAgentsService from './multi-agents-service';
+import toolBrowse from './tool-browse';
+import toolSearch from './tool-search';
 
 export function activate() {
-  serviceManager.registerService({
-    name: 'AgentService',
-    serviceClass: AgentService,
-    apiClasses: [ChatCompletionAPI],
-    viewClasses: [ChatView],
-    description: 'Have AI agents work for you.',
-  });
-  serviceManager.registerService({
-    name: 'MultiAgentsService',
-    serviceClass: MultiAgentsService,
-    apiClasses: [ChatCompletionAPI],
-    viewClasses: [MultiChatsView],
-    description: 'Have multiple AI agents work for you.',
-  });
+  toolManager.registerTool(toolBrowse);
+  toolManager.registerTool(toolSearch);
+}
+
+export function deactivate() {
+  toolManager.unregisterTool(toolBrowse.name);
+  toolManager.unregisterTool(toolSearch.name);
 }

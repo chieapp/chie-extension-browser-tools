@@ -1,21 +1,20 @@
 {
-  "name": "chie-extension-agent-service",
-  "private": true,
-  "displayName": "Agent Service",
+  "name": "chie-extension-browser-tools",
+  "displayName": "Browser Tools",
   "version": "0.0.1",
   "main": "dist/index.js",
+  "keywords": ["chie-extension"],
   "scripts": {
     "build": "tsc"
   },
   "devDependencies": {
     "@types/node": "18.x",
-    "chie": "../chie/types",
+    "chie": "^0.2.0",
     "typescript": "5.0.2"
   },
   "dependencies": {
     "@mozilla/readability": "^0.4.4",
     "googlethis": "^1.7.1",
-    "jsdom": "^22.0.0",
-    "vm2": "^3.9.17"
+    "jsdom": "^22.0.0"
   }
 }
